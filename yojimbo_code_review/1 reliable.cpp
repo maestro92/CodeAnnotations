@@ -1,3 +1,9 @@
+Reliable System 
+
+the idea is that both sender and receiver will generate sequence, ack and ack_bits for both sides
+
+
+
 
 so the yojimbo library makes heavy use of the reliable.io library.
 
@@ -9,12 +15,11 @@ It has the following features:
 2.  Packet fragmentation and reassembly
 3.  RTT and packet loss estimates
 
-
 so on the Packet level, we only record which packet is acked. but we dont do anything about it.
-
 
 then yojimbo implements reliable_ordered_messages ontop of reliable.io
 
+we will first look at how reliable.io works
 
 
 ##########################################################################################
@@ -28,6 +33,10 @@ there is message sequence number, and packet sequence number
     so message id related code will only exist in class UnreliableUnorderedChannel or class ReliableOrderedChannel
 
 -   the packet sequence number is used on the socket level
+
+This is called reliable_endpoint_t because its you can know which packets are received by the other side.
+
+
 
 the packet sequence number is stored in your reliable_endpoint_t.
 The reliable_endpoint_t stores all the variables related to your packet 
@@ -56,11 +65,58 @@ The reliable_endpoint_t stores all the variables related to your packet
                 };
 
 
+
+
+
+
+-   the acks is an array of acks, which is just uint16_t
+
+                struct reliable_endpoint_t * reliable_endpoint_create( struct reliable_config_t * config, double time )
+                {
+
+                    ...
+                    ...
+                    endpoint->acks = (uint16_t*) allocate_function( allocator_context, config->ack_buffer_size * sizeof( uint16_t ) );
+    
+                    ...
+                    ...
+
+                }
+
+-   we create an array ack_buffer_size of 256
+
+                void reliable_default_config( struct reliable_config_t * config )
+                {
+                    ...
+                    ...    
+
+                    config->ack_buffer_size = 256;
+
+                    ...
+                }
+
+
+-   the "struct reliable_sequence_buffer_t * sent_packets;" is essentially the "Sequence Buffer" mentioned in this article
+https://gafferongames.com/post/reliable_ordered_messages/
+
+    "to implement this ack system we need a data structure on the sender side to track whether a packet that has been acked 
+    so we can ignore redundant acks (each packet is acked multiple times via ack_bits"
+
+
+-   the "struct reliable_sequence_buffer_t * received_packets;" is essentially the part 
+
+    "we also need a data structure on the receiver side to keep track of which packets have been received so we can fill in 
+    the ack_bits value in the packet header"
+
+
 ##########################################################################################
 ############################### Reliable Sequence Buffer #################################
 ##########################################################################################
 
-1.  lets look at this reliable_sequence_buffer_t struct. In the sent_packets reliable_sequence_buffer_t, we store 
+1.  lets look at this reliable_sequence_buffer_t struct. and this is the actual implementation of Sequence Buffer
+
+
+In the sent_packets reliable_sequence_buffer_t, we store 
 all the packets we have sent. they wa we do it is that its a circular array 
 
                 reliable.c
@@ -142,6 +198,44 @@ so we will use entry_data + index * entry_stride to point to the start of each e
 
 
 
+
+
+
+
+                void BaseServer::AdvanceTime( double time )
+                {
+                    m_time = time;
+                    if ( IsRunning() )
+                    {
+                        for ( int i = 0; i < m_maxClients; ++i )
+                        {
+                            m_clientConnection[i]->AdvanceTime( time );
+                            ...
+                            ...
+
+                            reliable_endpoint_update( m_clientEndpoint[i], m_time );
+                            int numAcks;
+                            const uint16_t * acks = reliable_endpoint_get_acks( m_clientEndpoint[i], &numAcks );
+                            m_clientConnection[i]->ProcessAcks( acks, numAcks );
+        --------------->    reliable_endpoint_clear_acks( m_clientEndpoint[i] );
+                        }
+                        NetworkSimulator * networkSimulator = GetNetworkSimulator();
+                        if ( networkSimulator )
+                        {
+                            networkSimulator->AdvanceTime( time );
+                        }        
+                    }
+                }
+
+
+
+
+
+                void reliable_endpoint_clear_acks( struct reliable_endpoint_t * endpoint )
+                {
+                    reliable_assert( endpoint );
+                    endpoint->num_acks = 0;
+                }
 
 
 
@@ -330,11 +424,46 @@ that happens in the server.SendPackets(); function
     we will go into details regarding this function later.
 
 
-5.  let us look at reliable_endpoint_send_packet(); In this function 
+5.  let us look at reliable_endpoint_send_packet(); 
 
-    -   since we are on the socket level, everytime we want to send a packet, we have to increase our packet sequence number
+to give a brief, what we are doing is:
+        
+        "
+        On packet send:
+
+            1.  Insert an entry for for the current send packet sequence number in the sent packet 
+                sequence buffer with data indicating that it hasn’t been acked yet
+
+            2.  Generate ack and ack_bits from the contents of the local received packet 
+                sequence buffer and the most recent received packet sequence number
+
+            3.  Fill the packet header with sequence, ack and ack_bits
+
+            4.  Send the packet and increment the send packet sequence number
+        "
+https://gafferongames.com/post/reliable_ordered_messages/
+
+
+lets go into the details 
+
+    -   first you can see that we define these 3 variables 
 
                 uint16_t sequence = endpoint->sequence++;
+                uint16_t ack;
+                uint32_t ack_bits;
+
+
+        these are just the packet header that we need to implement packet level acks 
+
+        this is also mentioned here
+        https://gafferongames.com/post/reliable_ordered_messages/
+
+        these three variables combine to create the ack system.
+
+
+        uint16_t sequence = endpoint->sequence++;
+        uint16_6 ack is the most recent packet sequence number received, 
+        uint ack_bits is a bitfield encoding the set of acked packets
 
 
     -   then we generate the ack_bits.This was mentioned in Glenn_s article. we will be including 
@@ -406,9 +535,24 @@ that happens in the server.SendPackets(); function
 
 
     Glenn mentioned that for our protocol we will be including 32 acks. So here, we will be building 33 acks bit field here 
+    as you can see, we are literally 
 
+                "Generate ack and ack_bits from the contents of the local received packet 
+                sequence buffer and the most recent received packet sequence number"
 
                 reliable.c
+
+                void reliable_endpoint_send_packet( struct reliable_endpoint_t * endpoint, uint8_t * packet_data, int packet_bytes )
+                {
+
+                    ...
+
+                    reliable_sequence_buffer_generate_ack_bits( endpoint->received_packets, &ack, &ack_bits );
+
+                    ...
+                }
+
+
 
                 void reliable_sequence_buffer_generate_ack_bits( struct reliable_sequence_buffer_t * sequence_buffer, uint16_t * ack, uint32_t * ack_bits )
                 {
@@ -430,11 +574,19 @@ that happens in the server.SendPackets(); function
 
 
 
-6.  then we call reliable_sequence_buffer_insert(); recall that reliable_sequence_buffer_insert(); returns the address inside 
+6.  then we call reliable_sequence_buffer_insert(); 
+
+https://gafferongames.com/post/reliable_ordered_messages/
+
+
+
+recall that reliable_sequence_buffer_insert(); returns the address inside 
 endpoint->sent_packets->entry_data. now we are casting it into a (reliable_sent_packet_data_t*)
 
                 struct reliable_sent_packet_data_t * sent_packet_data = 
                     (struct reliable_sent_packet_data_t*) reliable_sequence_buffer_insert( endpoint->sent_packets, sequence );
+
+
 
 
 -   if you look at the definition of reliable_endpoint_send_packet, we just keep track of the acks and the number of bytes sent
@@ -857,6 +1009,28 @@ as you can see, there is the difference between regular packets and fragment pac
 
 11. let us look at regular packet case 
 
+
+and just like how its described in the article 
+
+
+    "
+        1.  Read in sequence from the packet header
+
+        2.  If sequence is more recent than the previous most recent received packet sequence number, 
+            update the most recent received packet sequence number
+
+        3.  Insert an entry for this packet in the received packet sequence buffer
+
+        4.  Decode the set of acked packet sequence numbers from ack and ack_bits in the packet header.
+
+        5.  Iterate across all acked packet sequence numbers and for any packet that is not already 
+            acked call OnPacketAcked( uint16_t sequence ) and mark that packet as acked in the sent packet sequence buffer.
+    "
+https://gafferongames.com/post/reliable_ordered_messages/
+
+
+
+
 -   first we do a reliable_sequence_buffer_test_insert check. we only want to insert a packet with a sequence number that is 
     larger than the one we have received. so anything less than what we have received (which are stale packets) we just ignore them
 
@@ -897,6 +1071,11 @@ as you can see, there is the difference between regular packets and fragment pac
 
                         ...
                         ...
+                        ...
+
+                        ..................................................................
+                        .......... Process Packet function ...............................
+                        ..................................................................
                        
                     }
                     else
@@ -928,6 +1107,14 @@ as you can see, there is the difference between regular packets and fragment pac
 
     which calls into:
 
+I assume this is what it is doing?
+
+    "Unfortunately, on the receive side packets arrive out of order and some are lost. 
+    Under ridiculously high packet loss (99%) I’ve seen old sequence buffer entries stick around 
+    from before the previous sequence number wrap at 65535 and break my ack logic 
+    (leading to false acks and broken reliability where the sender thinks the other side has received something they haven’t…)."
+
+
                 reliable.c
 
                 int reliable_sequence_buffer_test_insert( struct reliable_sequence_buffer_t * sequence_buffer, uint16_t sequence )
@@ -936,7 +1123,7 @@ as you can see, there is the difference between regular packets and fragment pac
                 }
 
 
-                
+
 
 13. back to the top, now once we have the packet data, we call process_packet_function();
 
@@ -1007,7 +1194,7 @@ as you can see, there is the difference between regular packets and fragment pac
                     ...
 
                     reliable_config.transmit_packet_function = BaseServer::StaticTransmitPacketFunction;
-                    reliable_config.process_packet_function = BaseServer::StaticProcessPacketFunction;
+    ----------->    reliable_config.process_packet_function = BaseServer::StaticProcessPacketFunction;
                 
                     ...
                 }
@@ -1067,6 +1254,122 @@ then we call Server::ProcessPacketFunction();
                 }
 
 
+
+
+
+
+
+
+
+
+16. after calling process_packet_function(); we continue on
+
+-   
+    "
+        5.  Iterate across all acked packet sequence numbers and for any packet that is not already 
+        acked call OnPacketAcked( uint16_t sequence ) and mark that packet as acked in the sent packet sequence buffer.
+    "
+
+    we set ack
+
+    struct reliable_sent_packet_data_t * sent_packet_data = (struct reliable_sent_packet_data_t*) 
+                                                reliable_sequence_buffer_find( endpoint->sent_packets, ack_sequence );
+
+    we set sent_packet_data->acked = 1;
+
+
+-   full code below: 
+
+                reliable.c
+
+                void reliable_endpoint_receive_packet( struct reliable_endpoint_t * endpoint, uint8_t * packet_data, int packet_bytes )
+                {
+                    ...
+                    ...
+
+                    uint8_t prefix_byte = packet_data[0];
+
+                    if ( ( prefix_byte & 1 ) == 0 )
+                    {
+                        // regular packet
+                        endpoint->counters[RELIABLE_ENDPOINT_COUNTER_NUM_PACKETS_RECEIVED]++;
+
+                        .....................................................................
+                        ............ Reading Packet Header ..................................
+                        .....................................................................
+
+                        if ( !reliable_sequence_buffer_test_insert( endpoint->received_packets, sequence ) )
+                        {
+                            reliable_printf( RELIABLE_LOG_LEVEL_DEBUG, "[%s] ignoring stale packet %d\n", endpoint->config.name, sequence );
+                            endpoint->counters[RELIABLE_ENDPOINT_COUNTER_NUM_PACKETS_STALE]++;
+                            return;
+                        }
+
+                        ...
+                        ...
+
+    --------------->    if ( endpoint->config.process_packet_function( endpoint->config.context, 
+                                                                       endpoint->config.index, 
+                                                                       sequence, 
+                                                                       packet_data + packet_header_bytes, 
+                                                                       packet_bytes - packet_header_bytes ) )
+                        {
+                            ...
+
+                            struct reliable_received_packet_data_t * received_packet_data = (struct reliable_received_packet_data_t*) reliable_sequence_buffer_insert( endpoint->received_packets, sequence );
+
+                            reliable_sequence_buffer_advance( endpoint->fragment_reassembly, sequence );
+
+                            ...
+
+                            received_packet_data->time = endpoint->time;
+                            received_packet_data->packet_bytes = endpoint->config.packet_header_size + packet_bytes;
+
+                            int i;
+                            for ( i = 0; i < 32; ++i )
+                            {
+                                if ( ack_bits & 1 )
+                                {                    
+                                    uint16_t ack_sequence = ack - ((uint16_t)i);
+                                    
+                                    struct reliable_sent_packet_data_t * sent_packet_data = (struct reliable_sent_packet_data_t*) reliable_sequence_buffer_find( endpoint->sent_packets, ack_sequence );
+
+                                    if ( sent_packet_data && !sent_packet_data->acked && endpoint->num_acks < endpoint->config.ack_buffer_size )
+                                    {
+                                        ...
+                                        endpoint->acks[endpoint->num_acks++] = ack_sequence;
+                                        endpoint->counters[RELIABLE_ENDPOINT_COUNTER_NUM_PACKETS_ACKED]++;
+                                        sent_packet_data->acked = 1;
+
+                                        float rtt = (float) ( endpoint->time - sent_packet_data->time ) * 1000.0f;
+                                        ...
+                                        if ( ( endpoint->rtt == 0.0f && rtt > 0.0f ) || fabs( endpoint->rtt - rtt ) < 0.00001 )
+                                        {
+                                            endpoint->rtt = rtt;
+                                        }
+                                        else
+                                        {
+                                            endpoint->rtt += ( rtt - endpoint->rtt ) * endpoint->config.rtt_smoothing_factor;
+                                        }
+                                    }
+                                }
+                                ack_bits >>= 1;
+                            }
+                        }
+                        else
+                        {
+                            reliable_printf( RELIABLE_LOG_LEVEL_ERROR, "[%s] process packet failed\n", endpoint->config.name );
+                        }
+                    }
+                    else
+                    {
+                        // fragment packet
+
+                        ...................................................
+                        .......... Reading Fragment Packet ................
+                        ...................................................
+                    }
+                }
 
 
 
@@ -1177,6 +1480,12 @@ then we call Server::ProcessPacketFunction();
                         ...................................................
                     }
                 }
+
+
+
+
+
+
 
 
 
@@ -1359,3 +1668,97 @@ then we call Server::ProcessPacketFunction();
                     uint64_t counters[RELIABLE_ENDPOINT_NUM_COUNTERS];
                 };
 
+
+
+
+for any packet that is not already caked call OnPacketAcked(uint16_t sequence)
+
+
+                void BaseServer::AdvanceTime( double time )
+                {
+                    m_time = time;
+                    if ( IsRunning() )
+                    {
+                        for ( int i = 0; i < m_maxClients; ++i )
+                        {
+                            m_clientConnection[i]->AdvanceTime( time );
+                            if ( m_clientConnection[i]->GetErrorLevel() != CONNECTION_ERROR_NONE )
+                            {
+                                yojimbo_printf( YOJIMBO_LOG_LEVEL_ERROR, "client %d connection is in error state. disconnecting client\n", m_clientConnection[i]->GetErrorLevel() );
+                                DisconnectClient( i );
+                                continue;
+                            }
+                            reliable_endpoint_update( m_clientEndpoint[i], m_time );
+                            int numAcks;
+                            const uint16_t * acks = reliable_endpoint_get_acks( m_clientEndpoint[i], &numAcks );
+    ------------------->    m_clientConnection[i]->ProcessAcks( acks, numAcks );
+                            reliable_endpoint_clear_acks( m_clientEndpoint[i] );
+                        }
+                        NetworkSimulator * networkSimulator = GetNetworkSimulator();
+                        if ( networkSimulator )
+                        {
+                            networkSimulator->AdvanceTime( time );
+                        }        
+                    }
+                }
+
+
+
+
+                void Connection::ProcessAcks( const uint16_t * acks, int numAcks )
+                {
+                    for ( int i = 0; i < numAcks; ++i )
+                    {
+                        for ( int channelIndex = 0; channelIndex < m_connectionConfig.numChannels; ++channelIndex )
+                        {
+                            m_channel[channelIndex]->ProcessAck( acks[i] );
+                        }
+                    }
+                }
+
+
+
+                yojimbo.cpp
+
+                void ReliableOrderedChannel::ProcessAck( uint16_t ack )
+                {
+                    SentPacketEntry * sentPacketEntry = m_sentPackets->Find( ack );
+                    if ( !sentPacketEntry )
+                        return;
+
+                    ...
+
+                    for ( int i = 0; i < (int) sentPacketEntry->numMessageIds; ++i )
+                    {
+                        const uint16_t messageId = sentPacketEntry->messageIds[i];
+                        MessageSendQueueEntry * sendQueueEntry = m_messageSendQueue->Find( messageId );
+                        if ( sendQueueEntry )
+                        {
+                            ...
+                            m_messageFactory->ReleaseMessage( sendQueueEntry->message );
+                            m_messageSendQueue->Remove( messageId );
+                            UpdateOldestUnackedMessageId();
+                        }
+                    }
+
+                    if ( !m_config.disableBlocks && sentPacketEntry->block && m_sendBlock->active && m_sendBlock->blockMessageId == sentPacketEntry->blockMessageId )
+                    {        
+                        const int messageId = sentPacketEntry->blockMessageId;
+                        const int fragmentId = sentPacketEntry->blockFragmentId;
+
+                        if ( !m_sendBlock->ackedFragment->GetBit( fragmentId ) )
+                        {
+                            m_sendBlock->ackedFragment->SetBit( fragmentId );
+                            m_sendBlock->numAckedFragments++;
+                            if ( m_sendBlock->numAckedFragments == m_sendBlock->numFragments )
+                            {
+                                m_sendBlock->active = false;
+                                MessageSendQueueEntry * sendQueueEntry = m_messageSendQueue->Find( messageId );
+                                yojimbo_assert( sendQueueEntry );
+                                m_messageFactory->ReleaseMessage( sendQueueEntry->message );
+                                m_messageSendQueue->Remove( messageId );
+                                UpdateOldestUnackedMessageId();
+                            }
+                        }
+                    }
+                }

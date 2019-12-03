@@ -439,3 +439,152 @@ so the block message on the UnreliableUnorderedChannel, we dont actually split u
 
                     return true;
                 }
+
+
+
+#########################################################################################
+############################# Receiving Packet ##########################################
+#########################################################################################
+
+
+
+
+1.  
+
+
+                yojimbo.cpp
+
+                bool Connection::ProcessPacket( void * context, uint16_t packetSequence, const uint8_t * packetData, int packetBytes )
+                {
+                    ...
+
+                    ConnectionPacket packet;
+
+                    if ( !ReadPacket( context, *m_messageFactory, m_connectionConfig, packet, packetData, packetBytes ) )
+                    {
+                        yojimbo_printf( YOJIMBO_LOG_LEVEL_ERROR, "error: failed to read packet\n" );
+                        m_errorLevel = CONNECTION_ERROR_READ_PACKET_FAILED;
+                        return false;            
+                    }
+
+                    for ( int i = 0; i < packet.numChannelEntries; ++i )
+                    {
+                        const int channelIndex = packet.channelEntry[i].channelIndex;
+                        ...
+
+                        m_channel[channelIndex]->ProcessPacketData( packet.channelEntry[i], packetSequence );
+                        
+                        ...
+                    }
+
+                    return true;
+                }
+
+
+
+
+2.  as you can see, we are just pushing our messages into "m_messageReceiveQueue"
+    another thing is that, you can see the messages sets their id to the packet sequence id.
+
+
+                void UnreliableUnorderedChannel::ProcessPacketData( const ChannelPacketData & packetData, uint16_t packetSequence )
+                {
+                    if ( m_errorLevel != CHANNEL_ERROR_NONE )
+                        return;
+                    
+                    if ( packetData.messageFailedToSerialize )
+                    {
+                        SetErrorLevel( CHANNEL_ERROR_FAILED_TO_SERIALIZE );
+                        return;
+                    }
+
+                    for ( int i = 0; i < (int) packetData.message.numMessages; ++i )
+                    {
+                        Message * message = packetData.message.messages[i];
+                        yojimbo_assert( message );  
+                        message->SetId( packetSequence );
+                        if ( !m_messageReceiveQueue->IsFull() )
+                        {
+                            m_messageFactory->AcquireMessage( message );
+                            m_messageReceiveQueue->Push( message );
+                        }
+                    }
+                }
+
+
+
+
+
+
+
+
+
+
+
+                while ( true )
+                {
+                    Message * message = server.ReceiveMessage( clientIndex, RELIABLE_ORDERED_CHANNEL );
+                    if ( !message )
+                        break;
+
+                    yojimbo_assert( message->GetId() == (uint16_t) numMessagesReceivedFromClient );
+
+                    switch ( message->GetType() )
+                    {
+                        case TEST_MESSAGE:
+                        {
+                            TestMessage * testMessage = (TestMessage*) message;
+                            yojimbo_assert( testMessage->sequence == uint16_t( numMessagesReceivedFromClient ) );
+                            printf( "server received message %d\n", testMessage->sequence );
+                            server.ReleaseMessage( clientIndex, message );
+                            numMessagesReceivedFromClient++;
+                        }
+                        break;
+
+                        case TEST_BLOCK_MESSAGE:
+                        {
+                            TestBlockMessage * blockMessage = (TestBlockMessage*) message;
+                            yojimbo_assert( blockMessage->sequence == uint16_t( numMessagesReceivedFromClient ) );
+                            const int blockSize = blockMessage->GetBlockSize();
+                            const int expectedBlockSize = 1 + ( int( numMessagesReceivedFromClient ) * 33 ) % MaxBlockSize;
+                            if ( blockSize  != expectedBlockSize )
+                            {
+                                printf( "error: block size mismatch. expected %d, got %d\n", expectedBlockSize, blockSize );
+                                return 1;
+                            }
+                            const uint8_t * blockData = blockMessage->GetBlockData();
+                            yojimbo_assert( blockData );
+                            for ( int i = 0; i < blockSize; ++i )
+                            {
+                                if ( blockData[i] != uint8_t( numMessagesReceivedFromClient + i ) )
+                                {
+                                    printf( "error: block data mismatch. expected %d, but blockData[%d] = %d\n", uint8_t( numMessagesReceivedFromClient + i ), i, blockData[i] );
+                                    return 1;
+                                }
+                            }
+                            printf( "server received message %d\n", uint16_t( numMessagesReceivedFromClient ) );
+                            server.ReleaseMessage( clientIndex, message );
+                            numMessagesReceivedFromClient++;
+                        }
+                        break;
+                    }
+                }
+
+
+
+
+
+
+                
+                Message * UnreliableUnorderedChannel::ReceiveMessage()
+                {
+                    if ( GetErrorLevel() != CHANNEL_ERROR_NONE )
+                        return NULL;
+
+                    if ( m_messageReceiveQueue->IsEmpty() )
+                        return NULL;
+
+                    m_counters[CHANNEL_COUNTER_MESSAGES_RECEIVED]++;
+
+                    return m_messageReceiveQueue->Pop();
+                }

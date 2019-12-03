@@ -1068,6 +1068,21 @@ notice that inside SentPacketEntry, some of the variables are used for sending m
 
 
 
+                Message * UnreliableUnorderedChannel::ReceiveMessage()
+                {
+                    if ( GetErrorLevel() != CHANNEL_ERROR_NONE )
+                        return NULL;
+
+                    if ( m_messageReceiveQueue->IsEmpty() )
+                        return NULL;
+
+                    m_counters[CHANNEL_COUNTER_MESSAGES_RECEIVED]++;
+
+                    return m_messageReceiveQueue->Pop();
+                }
+
+
+
 
 
 

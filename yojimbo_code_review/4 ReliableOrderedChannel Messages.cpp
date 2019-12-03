@@ -412,6 +412,13 @@ want to get an idea of how many messages we can send and calculate the exact val
                 if ( entry->block )
                     break;
 
+-   notice the messageId is set to 
+
+                uint16_t messageId = m_oldestUnackedMessageId + i;
+
+    for each message we send, we set its id number starting from the m_oldestUnackedMessageId
+
+
 -   full code below:
 
                 yojimbo.cpp
@@ -488,7 +495,40 @@ want to get an idea of how many messages we can send and calculate the exact val
 
 
 
-9.  now we want to extract the data out of the messages 
+9.  after calling GetMessagesToSend(); we now have messageIds and numMessageIds filled out. 
+
+now we actually want to convert messages to bytes and put these bytes into a packet. That happense in the GetMessagePacketData(); function
+
+                yojimbo.cpp 
+
+                int ReliableOrderedChannel::GetPacketData( void *context, ChannelPacketData & packetData, uint16_t packetSequence, int availableBits )
+                {
+                    ...
+
+                    if ( SendingBlockMessage() )
+                    {
+                        ..........................................
+                        ....... Sending block messages .........
+                        ..........................................
+                    }
+                    else
+                    {
+                        int numMessageIds = 0;
+                        uint16_t * messageIds = (uint16_t*) alloca( m_config.maxMessagesPerPacket * sizeof( uint16_t ) );
+                        const int messageBits = GetMessagesToSend( messageIds, numMessageIds, availableBits, context );
+
+                        if ( numMessageIds > 0 )
+                        {
+    ------------------->    GetMessagePacketData( packetData, messageIds, numMessageIds );
+                            AddMessagePacketEntry( messageIds, numMessageIds, packetSequence );
+                            return messageBits;
+                        }
+                    }
+
+                    return 0;
+                }
+
+
 
 -   we first initalize the numMessages 
 
@@ -497,6 +537,7 @@ want to get an idea of how many messages we can send and calculate the exact val
 -   then we go through numMessageIds and we fill in the data in the messages
 
                 yojimbo.cpp
+
 
                 void ReliableOrderedChannel::GetMessagePacketData( ChannelPacketData & packetData, const uint16_t * messageIds, int numMessageIds )
                 {
@@ -522,12 +563,13 @@ want to get an idea of how many messages we can send and calculate the exact val
 
 
 
-10.  we also look at AddMessagePacketEntry(); What is happening here is that we are adding the message records into SentPacketEntry
-    note we are also adding records of it based on the sequence id
+10.  Now in the ReliableOrderedChannel, we need a record of which messages went out with which packet.
+hence we write a record of the packetSequence ---> messages mapping.
+This way whenever we receive an ack for a packet, we know which messages are received as well.
 
                 yojimbo.cpp
 
-                void ReliableOrderedChannel::AddMessagePacketEntry( const uint16_t * messageIds, int numMessageIds, uint16_t sequence )
+                void ReliableOrderedChannel::AddMessagePacketEntry( const uint16_t * messageIds, int numMessageIds, uint16_t packetSequence )
                 {
                     SentPacketEntry * sentPacket = m_sentPackets->Insert( sequence );
                     yojimbo_assert( sentPacket );
@@ -774,120 +816,54 @@ want to get an idea of how many messages we can send and calculate the exact val
 
 18. The ProcessPacketMessages just adds a fragment to the block. then we check if we are done assembling this block
 
-    -   in the last part, we check if we are done assembling the message. if so, we push the message to the m_messageReceiveQueue
-
-                if ( m_receiveBlock->numReceivedFragments == m_receiveBlock->numFragments )
-                {
-                    ...
-                    MessageReceiveQueueEntry * entry = m_messageReceiveQueue->Insert( messageId );
-                    ...
-                }
+    -   first we check if the 
 
     
     -   full code below:
 
                 yojimbo.cpp
 
-                void ReliableOrderedChannel::ProcessPacketFragment( int messageType, 
-                                                                    uint16_t messageId, 
-                                                                    int numFragments, 
-                                                                    uint16_t fragmentId, 
-                                                                    const uint8_t * fragmentData, 
-                                                                    int fragmentBytes, 
-                                                                    BlockMessage * blockMessage )
-                {  
-                    ...
+                void ReliableOrderedChannel::ProcessPacketMessages( int numMessages, Message ** messages )
+                {
+                    const uint16_t minMessageId = m_receiveMessageId;
+                    const uint16_t maxMessageId = m_receiveMessageId + m_config.messageReceiveQueueSize - 1;
 
-                    if ( fragmentData )
+                    for ( int i = 0; i < (int) numMessages; ++i )
                     {
-                        const uint16_t expectedMessageId = m_messageReceiveQueue->GetSequence();
-                        if ( messageId != expectedMessageId )
+                        Message * message = messages[i];
+
+                        yojimbo_assert( message );  
+
+                        const uint16_t messageId = message->GetId();
+
+                        if ( sequence_less_than( messageId, minMessageId ) )
+                            continue;
+
+                        if ( sequence_greater_than( messageId, maxMessageId ) )
+                        {
+                            // Did you forget to dequeue messages on the receiver?
+                            SetErrorLevel( CHANNEL_ERROR_DESYNC );
                             return;
-
-                        // start receiving a new block
-                        if ( !m_receiveBlock->active )
-                        {
-                            ...
-
-                            m_receiveBlock->active = true;
-                            m_receiveBlock->numFragments = numFragments;
-                            m_receiveBlock->numReceivedFragments = 0;
-                            m_receiveBlock->messageId = messageId;
-                            m_receiveBlock->blockSize = 0;
-                            m_receiveBlock->receivedFragment->Clear();
                         }
 
-                        ...
-                        ...
+                        if ( m_messageReceiveQueue->Find( messageId ) )
+                            continue;
 
+                        yojimbo_assert( !m_messageReceiveQueue->GetAtIndex( m_messageReceiveQueue->GetIndex( messageId ) ) );
 
-                        // receive the fragment
-                        if ( !m_receiveBlock->receivedFragment->GetBit( fragmentId ) )
+                        MessageReceiveQueueEntry * entry = m_messageReceiveQueue->Insert( messageId );
+                        if ( !entry )
                         {
-                            m_receiveBlock->receivedFragment->SetBit( fragmentId );
-
-                            memcpy( m_receiveBlock->blockData + fragmentId * m_config.blockFragmentSize, fragmentData, fragmentBytes );
-
-                            if ( fragmentId == 0 )
-                            {
-                                m_receiveBlock->messageType = messageType;
-                            }
-
-                            if ( fragmentId == m_receiveBlock->numFragments - 1 )
-                            {
-                                m_receiveBlock->blockSize = ( m_receiveBlock->numFragments - 1 ) * m_config.blockFragmentSize + fragmentBytes;
-
-                                if ( m_receiveBlock->blockSize > (uint32_t) m_config.maxBlockSize )
-                                {
-                                    // The block size is outside range
-                                    SetErrorLevel( CHANNEL_ERROR_DESYNC );
-                                    return;
-                                }
-                            }
-
-                            m_receiveBlock->numReceivedFragments++;
-
-                            if ( fragmentId == 0 )
-                            {
-                                // save block message (sent with fragment 0)
-                                m_receiveBlock->blockMessage = blockMessage;
-                                m_messageFactory->AcquireMessage( m_receiveBlock->blockMessage );
-                            }
-
-                            if ( m_receiveBlock->numReceivedFragments == m_receiveBlock->numFragments )
-                            {
-                                ...
-                                ...
-
-                                blockMessage = m_receiveBlock->blockMessage;
-
-                                ...
-
-                                uint8_t * blockData = (uint8_t*) YOJIMBO_ALLOCATE( m_messageFactory->GetAllocator(), m_receiveBlock->blockSize );
-
-                                ...
-
-                                memcpy( blockData, m_receiveBlock->blockData, m_receiveBlock->blockSize );
-
-                                blockMessage->AttachBlock( m_messageFactory->GetAllocator(), blockData, m_receiveBlock->blockSize );
-
-                                blockMessage->SetId( messageId );
-
-                                MessageReceiveQueueEntry * entry = m_messageReceiveQueue->Insert( messageId );
-                                ...
-                                entry->message = blockMessage;
-                                m_receiveBlock->active = false;
-                                m_receiveBlock->blockMessage = NULL;
-                            }
+                            // For some reason we can't insert the message in the receive queue
+                            SetErrorLevel( CHANNEL_ERROR_DESYNC );
+                            return;
                         }
+
+                        entry->message = message;
+
+                        m_messageFactory->AcquireMessage( message );
                     }
                 }
-
-
-
-
-
-
 
 
 #####################################################################################################
@@ -895,7 +871,43 @@ want to get an idea of how many messages we can send and calculate the exact val
 #####################################################################################################
 
 
-19. now lets look at how ProcessAck(); work. we assume that the receiver sent back an ack for the message and the sender is processing this ack.
+
+19. Let us look at what happens when we process acks. The socket level actually passes down the acks 
+they have gathered this tick to the connection level
+
+
+
+
+
+                void BaseServer::AdvanceTime( double time )
+                {
+                    m_time = time;
+                    if ( IsRunning() )
+                    {
+                        for ( int i = 0; i < m_maxClients; ++i )
+                        {
+                            m_clientConnection[i]->AdvanceTime( time );
+                            ...
+                            ...
+
+                            reliable_endpoint_update( m_clientEndpoint[i], m_time );
+                            int numAcks;
+                            const uint16_t * acks = reliable_endpoint_get_acks( m_clientEndpoint[i], &numAcks );
+                            m_clientConnection[i]->ProcessAcks( acks, numAcks );
+        --------------->    reliable_endpoint_clear_acks( m_clientEndpoint[i] );
+                        }
+                        NetworkSimulator * networkSimulator = GetNetworkSimulator();
+                        if ( networkSimulator )
+                        {
+                            networkSimulator->AdvanceTime( time );
+                        }        
+                    }
+                }
+
+
+
+
+20. now lets look at how ProcessAck(); work. we assume that the receiver sent back an ack for the message and the sender is processing this ack.
     -   recall that if we are sending a block message, "sentPacketEntry->numMessageIds;" is set to 0, and "sentPacketEntry->messageIds is null"
         so we essentially skip the first for loop if we are processing a block message
 
@@ -963,144 +975,34 @@ want to get an idea of how many messages we can send and calculate the exact val
 
 
 
-20.  going back to the PumpConnectionUpdate(); function the receiver obviously doesnt do anything in the GeneratePacket(); function 
-
-                void PumpConnectionUpdate( ConnectionConfig & connectionConfig, double & time, Connection & sender, Connection & receiver, uint16_t & senderSequence, uint16_t & receiverSequence, float deltaTime = 0.1f, int packetLossPercent = 90 )
-                {
-                    uint8_t * packetData = (uint8_t*) alloca( connectionConfig.maxPacketSize );
-
-                    int packetBytes;
-                    if ( sender.GeneratePacket( NULL, senderSequence, packetData, connectionConfig.maxPacketSize, packetBytes ) )
-                    {
-                        if ( random_int( 0, 100 ) >= packetLossPercent )
-                        {
-                            receiver.ProcessPacket( NULL, senderSequence, packetData, packetBytes );
-                            sender.ProcessAcks( &senderSequence, 1 );
-                        }
-                    }
-
-                    if ( receiver.GeneratePacket( NULL, receiverSequence, packetData, connectionConfig.maxPacketSize, packetBytes ) )
-                    {
-                        if ( random_int( 0, 100 ) >= packetLossPercent )
-                        {
-                            sender.ProcessPacket( NULL, receiverSequence, packetData, packetBytes );
-                            receiver.ProcessAcks( &receiverSequence, 1 );
-                        }
-                    }
-
-                    time += deltaTime;
-
-                    sender.AdvanceTime( time );
-                    receiver.AdvanceTime( time );
-
-                    senderSequence++;
-                    receiverSequence++;
-                }
 
 
 
 
-21.  going back to the PumpConnectionUpdate(); function the receiver obviously doesnt do anything in the GeneratePacket(); function 
 
 
-                void test_connection_reliable_ordered_blocks()
-                {
-                    TestMessageFactory messageFactory( GetDefaultAllocator() );
-
-                    double time = 100.0;
-
-                    ...............................................................
-                    .......... initializing Sender and Receiver ...................
-                    ...............................................................
-
-                    const int NumMessagesSent = 32;
+21. the way we have reliably-ordered-messages is that we keep on requesting the next message we expect to get 
+which is m_receiveMessageId. If we havent gotten it, then we will return null;
 
 
-                    ........................................................................
-                    .......... initializing Block Messages to the Sender ...................
-                    ........................................................................
-
-                    uint16_t senderSequence = 0;
-                    uint16_t receiverSequence = 0;
-
-
-                    for ( int i = 0; i < NumIterations; ++i )
-                    {
-                        PumpConnectionUpdate( connectionConfig, time, sender, receiver, senderSequence, receiverSequence );
-
-                        while ( true )
-                        {
-                            Message * message = receiver.ReceiveMessage( 0 );
-                            if ( !message )
-                                break;
-
-                            ...
-
-                            TestBlockMessage * blockMessage = (TestBlockMessage*) message;
-
-                            const int blockSize = blockMessage->GetBlockSize();
-                            const uint8_t * blockData = blockMessage->GetBlockData();
-
-
-                            for ( int j = 0; j < blockSize; ++j )
-                            {
-                                check( blockData[j] == uint8_t( numMessagesReceived + j ) );
-                            }
-
-                            ++numMessagesReceived;
-
-                            messageFactory.ReleaseMessage( message );
-                        }
-
-                        if ( numMessagesReceived == NumMessagesSent )
-                            break;
-                    }
-                }
-
-
-
-22. so now we want to look at receive.ReceiveMessage();
-    recall in receiver.ProcessPacket(); we push a message to our m_messageReceiveQueue if the block message is done assembling.
-    here we actually process the message 
 
                 Message * ReliableOrderedChannel::ReceiveMessage()
                 {
-                    ...
+                    if ( GetErrorLevel() != CHANNEL_ERROR_NONE )
+                        return NULL;
 
                     MessageReceiveQueueEntry * entry = m_messageReceiveQueue->Find( m_receiveMessageId );
                     if ( !entry )
                         return NULL;
 
                     Message * message = entry->message;
-                    ...
+                    yojimbo_assert( message );
+                    yojimbo_assert( message->GetId() == m_receiveMessageId );
                     m_messageReceiveQueue->Remove( m_receiveMessageId );
                     m_counters[CHANNEL_COUNTER_MESSAGES_RECEIVED]++;
                     m_receiveMessageId++;
 
                     return message;
                 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 

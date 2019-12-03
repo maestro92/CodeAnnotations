@@ -767,7 +767,7 @@ if you look at the definition for reliable_config_t, transmit_packet_function is
                 server.cspp 
 
                 int ServerMain()
-                {
+                {0
                     ...
                     ...
 
@@ -1068,115 +1068,6 @@ then we call Server::ProcessPacketFunction();
 
 
 
-
-
-
-
-
-
-
-16. after calling process_packet_function(); we continue on
-
--   we set ack
-
-    struct reliable_sent_packet_data_t * sent_packet_data = (struct reliable_sent_packet_data_t*) 
-                                                reliable_sequence_buffer_find( endpoint->sent_packets, ack_sequence );
-
-    we set sent_packet_data->acked = 1;
-
-
--   full code below: 
-
-                reliable.c
-
-                void reliable_endpoint_receive_packet( struct reliable_endpoint_t * endpoint, uint8_t * packet_data, int packet_bytes )
-                {
-                    ...
-                    ...
-
-                    uint8_t prefix_byte = packet_data[0];
-
-                    if ( ( prefix_byte & 1 ) == 0 )
-                    {
-                        // regular packet
-                        endpoint->counters[RELIABLE_ENDPOINT_COUNTER_NUM_PACKETS_RECEIVED]++;
-
-                        .....................................................................
-                        ............ Reading Packet Header ..................................
-                        .....................................................................
-
-                        if ( !reliable_sequence_buffer_test_insert( endpoint->received_packets, sequence ) )
-                        {
-                            reliable_printf( RELIABLE_LOG_LEVEL_DEBUG, "[%s] ignoring stale packet %d\n", endpoint->config.name, sequence );
-                            endpoint->counters[RELIABLE_ENDPOINT_COUNTER_NUM_PACKETS_STALE]++;
-                            return;
-                        }
-
-                        ...
-                        ...
-
-    --------------->    if ( endpoint->config.process_packet_function( endpoint->config.context, 
-                                                                       endpoint->config.index, 
-                                                                       sequence, 
-                                                                       packet_data + packet_header_bytes, 
-                                                                       packet_bytes - packet_header_bytes ) )
-                        {
-                            ...
-
-                            struct reliable_received_packet_data_t * received_packet_data = (struct reliable_received_packet_data_t*) reliable_sequence_buffer_insert( endpoint->received_packets, sequence );
-
-                            reliable_sequence_buffer_advance( endpoint->fragment_reassembly, sequence );
-
-                            ...
-
-                            received_packet_data->time = endpoint->time;
-                            received_packet_data->packet_bytes = endpoint->config.packet_header_size + packet_bytes;
-
-                            int i;
-                            for ( i = 0; i < 32; ++i )
-                            {
-                                if ( ack_bits & 1 )
-                                {                    
-                                    uint16_t ack_sequence = ack - ((uint16_t)i);
-                                    
-                                    struct reliable_sent_packet_data_t * sent_packet_data = (struct reliable_sent_packet_data_t*) reliable_sequence_buffer_find( endpoint->sent_packets, ack_sequence );
-
-                                    if ( sent_packet_data && !sent_packet_data->acked && endpoint->num_acks < endpoint->config.ack_buffer_size )
-                                    {
-                                        ...
-                                        endpoint->acks[endpoint->num_acks++] = ack_sequence;
-                                        endpoint->counters[RELIABLE_ENDPOINT_COUNTER_NUM_PACKETS_ACKED]++;
-                                        sent_packet_data->acked = 1;
-
-                                        float rtt = (float) ( endpoint->time - sent_packet_data->time ) * 1000.0f;
-                                        ...
-                                        if ( ( endpoint->rtt == 0.0f && rtt > 0.0f ) || fabs( endpoint->rtt - rtt ) < 0.00001 )
-                                        {
-                                            endpoint->rtt = rtt;
-                                        }
-                                        else
-                                        {
-                                            endpoint->rtt += ( rtt - endpoint->rtt ) * endpoint->config.rtt_smoothing_factor;
-                                        }
-                                    }
-                                }
-                                ack_bits >>= 1;
-                            }
-                        }
-                        else
-                        {
-                            reliable_printf( RELIABLE_LOG_LEVEL_ERROR, "[%s] process packet failed\n", endpoint->config.name );
-                        }
-                    }
-                    else
-                    {
-                        // fragment packet
-
-                        ...................................................
-                        .......... Reading Fragment Packet ................
-                        ...................................................
-                    }
-                }
 
 
 
