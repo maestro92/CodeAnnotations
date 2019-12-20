@@ -948,6 +948,12 @@ if you look at the definition for reliable_config_t, transmit_packet_function is
 
 
 11. The netcode_server_receive_packet just returns an array of bytes for you
+    -   notice that when we call 
+
+        netcode_server_receive_packet( m_server, clientIndex, &packetBytes, &packetSequence )
+
+
+    -   full code below:
 
                 void Server::ReceivePackets()
                 {

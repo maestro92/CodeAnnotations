@@ -48,6 +48,33 @@ Let us look at the class definitions
                 }
 
 
+So on the Sending side you will mostly be using
+
+                private:
+
+    ----------->    uint16_t m_sendMessageId;                                                       ///< Id of the next message to be added to the send queue.
+                    uint16_t m_receiveMessageId;                                                    ///< Id of the next message to be added to the receive queue.
+                    uint16_t m_oldestUnackedMessageId;                                              ///< Id of the oldest unacked message in the send queue.
+    ----------->    SequenceBuffer<SentPacketEntry> * m_sentPackets;                                ///< Stores information per sent connection packet about messages and block data included in each packet. Used to walk from connection packet level acks to message and data block fragment level acks.
+    ----------->    SequenceBuffer<MessageSendQueueEntry> * m_messageSendQueue;                     ///< Message send queue.
+                    SequenceBuffer<MessageReceiveQueueEntry> * m_messageReceiveQueue;               ///< Message receive queue.
+                    uint16_t * m_sentPacketMessageIds;                                              ///< Array of n message ids per sent connection packet. Allows the maximum number of messages per-packet to be allocated dynamically.
+                    SendBlockData * m_sendBlock;                                                    ///< Data about the block being currently sent.
+                    ReceiveBlockData * m_receiveBlock;                                              ///< Data about the block being currently received.
+
+
+
+you may wonder what is the difference between m_sendMessageId and m_messageSendQueue.sequence.
+the thing is that the messages you have inserted to the m_messageSendQueue, you actually havent sent them out,
+you only have just put the messages in the queue. 
+
+m_sendMessageId is the actually message Id that you have sent out. Hence the difference.
+
+
+
+
+
+
 int this channel, you will either be sending regular messages or block messages. Some of these are only used for block messages
 
                 
